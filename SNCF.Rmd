@@ -1,0 +1,471 @@
+---
+title: "SNCF"
+author: "Fabien"
+date: "February 10, 2018"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Prices of high-speed trains (TGV) in France
+
+## Objectives
+* Understand the role of distance in train pricing in France. 
+* Analyse correlation of first and second class tickets
+* Analyse discounted tickets
+* Create additional features to understand SNCF pricing model
+
+## Data source
+https://data.sncf.com/explore/dataset/tarifs-tgv-par-od/analyze/
+The table indicates price of train tickets (discount, second class, first class) for 4,162 journeys (in practice they do yield pricing but those are the reference prices). 
+
+## Workplan
+*	data import: could do easily in .csv, but I will try in JSON to get experience with API
+*	EDA: check consistency, quality of data 
+*	clean set: separate origin and destination (now in the same cell)
+*	add position based on an openmaps package
+*	add distance between cities based on an openmaps package
+*	data viz: show map with number of referenced connections by city
+*	regression: predict price with distance 
+*	add features: ex. to/from Paris and refine prediction
+*	analyse correlation between prices of different classes 
+
+## Data import
+```{r Data import, echo=TRUE, warning=FALSE}
+library(needs)
+
+#Load all required packages
+needs(dplyr, Hmisc)
+
+#Set the working directory to the right folder
+setwd("C:\\Users\\Hassan Fabien\\Documents\\NYC Data Science\\SNCF")
+
+#Load data with right separator
+TGVprices_raw <- read.csv("tarifs-tgv-par-od.csv", sep = ";")
+
+#Identify variables
+colnames(TGVprices_raw)
+str(TGVprices_raw)
+
+
+#The comments are unimportant. Let's remove them to simplify the dataframe and keep only the journey, the discounted 2nd class price, the full-fare 2nd class price, the 1st class price.
+TGVprices_1 <- select(TGVprices_raw, -5)
+  
+```
+
+## Split of origin and destination
+
+```{r separate OD}
+
+head(TGVprices_raw, 3)
+
+# O and D are seprated by -
+# Let's see if there is only 1 - per line
+needs(stringr)
+str(TGVprices_1)
+TGVprices_1$OD <-  as.character(TGVprices_1$OD )
+
+str(TGVprices_1)
+nrow(TGVprices_1)
+str_count(TGVprices_1,"\\-")
+
+#There are 4260 dashes, vs. 4162 lines, ie there must be some problems
+4260-4162
+
+# Identify lines with multiple dashes
+describe(str_count(TGVprices_1$OD,"-"))
+
+#87 lines with problems, seems manageable manually by adjusting the problematic cities
+problems <- filter(TGVprices_1, str_count(TGVprices_1$OD,"-")>1)
+
+View(problems)
+
+# There seem to be limited problems. The main ones can be solved by removing - in the middle of city names. 
+# I checked on google maps, it still finds the right city anyway
+TGVprices_2 <- as.data.frame(TGVprices_1)
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "BELFORT-MONTBELIARD","BELFORT MONTBELIARD")
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "BESANCON FRANCHE-COMTE","BESANCON FRANCHE COMTE")
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "la-teste","GARE DE LA TESTE")
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "ST AVRE - LA CHAMBRE","ST AVRE LA CHAMBRE")
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "VITRY-LE-FRANÃ‡OIS","VITRY LE FRANCOIS")
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "AIX-LES-BAINS - LE REVARD","AIX LES BAINS LE REVARD")
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "LILLE EUROPE-147322","LILLE EUROPE")
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "Chalon-sur-SaÃ´ne","CHALON SUR SAONE")
+
+# In a few cases, the city name is duplicated 
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "BOURG ST MAURICE-BOURG ST MAURICE","BOURG ST MAURICE")
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "ALBERTVILLE-ALBERTVILLE","ALBERTVILLE")
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "LANDRY-LANDRY","LANDRY")
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "LAVAL-AIME LA PLAGNE-LAVAL","LAVAL-AIME LA PLAGNE")
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "MOUTIERS SALINS BRIDES L BAINS-LAVAL-MOUTIERS SALINS BRIDES L BAINS","MOUTIERS SALINS BRIDES LES BAINS-LAVAL")
+
+
+# Also changes with special characters
+TGVprices_2$OD <-  str_replace_all(TGVprices_2$OD, "CHAMBÃ‰RY-CHAMBÃ‰RY","CHAMBERY")
+
+# Check remaining problems and add relevant str_replace_all until problems2 is empty
+problems2 <- filter(TGVprices_2, str_count(TGVprices_2$OD,"-")>1)
+nrow(problems2)
+
+#Finally we need to find the row that has no -
+problems3 <- filter(TGVprices_2, str_count(TGVprices_2$OD,"-")<1)
+View(problems3)
+which(grepl("^BELFORT MONTBELIARD$", TGVprices_2$OD))
+
+# Let's delete that row, #2238, which has only one city and cannot make sense.
+TGVprices_3 <- TGVprices_2[-2238,]
+
+# Check that we have one unique "-" in each line
+describe(str_count(TGVprices_3$OD,"-"))
+
+# Run a separate (tidyr)
+needs(tidyr)
+TGVprices_4 <- TGVprices_3 %>%
+  separate(OD, c("Origin","Destination"), sep="-")
+
+str(TGVprices_4)
+
+```
+
+## EDA
+
+```{r EDA, echo=TRUE, warning=FALSE}
+
+describe(TGVprices_4)
+
+ggplot(TGVprices_4) +
+  geom_histogram(aes(x=Prix.d.appel.2nde))
+
+ggplot(TGVprices_4) +
+  geom_histogram(aes(x=Plein.Tarif.Loisir.2nde))
+
+ggplot(TGVprices_4) +
+  geom_histogram(aes(x=X1Ã.re.classe))
+
+```
+
+"Prix.d.appel.2nde" (discounted price) has 1515 missing values. Otherwise the database seems clean:
+* no missing values
+* consistent mean prices and quartiers, no outliers
+
+We can assume that this means those routes are not typically discounted. We had a dummy feature to signal the presence of a discount, might be useful later in the analysis. 
+
+The distributions of 2nd and 1st class prices are relatively flat, with peaks around 100EUR
+The distribution of discounted prices is very different, discrete with prices at 15, 20, 25 and 30 EUR. 25 is the most frequent.
+
+```{r discount}
+
+TGVprices_4$Discounted <- as.numeric(ifelse(is.na(TGVprices_4$Prix.d.appel.2nde),0,1))
+
+```
+
+## Locations
+
+We need to add the coordinates of all cities to create distances.
+
+The code below didn't work because of data limit
+
+
+<i>
+needs(geonames)
+
+\# create an account online with access to web services
+
+\# Find all origins
+Origins <- as.vector(TGVprices_4$Origin)
+
+\# Conveninence function to look up and format results
+GNsearchFR <- function(x) {
+  res <- GNsearch(name=x, country="FR", username="faberlin90")
+  return(res[1, ])
+}
+
+\# Loop over city names and reformat
+First test with 6 cities
+test.cities <- as.vector(head(Origins))
+GNresult <- sapply(test.cities, GNsearchFR)
+GNresult <- do.call("rbind", GNresult)
+GNresult <- cbind(city=row.names(GNresult),
+                 subset(GNresult, select=c("lng", "lat")))
+View(GNresult)
+
+\# Now with all cities
+Origins.result <- sapply(Origins, GNsearchFR)
+Origins.result <- do.call("rbind", Origins.result)
+Origins.result <- cbind(city=row.names(Origins.result), 
+                  subset(Origins.result, select=c("lng", "lat")))
+                  
+View(Origins.result)
+</i>
+
+
+<span style="color:red">
+Error in getJson(name, params) : error code 19 from server: the hourly limit of 2000 credits for faberlin90 has been exceeded. Please throttle your requests or use the commercial service.
+</span>
+
+This exceeds the data limit. 
+So we disable the code and try to create a cleaner list of cities without duplicates.
+
+```{r list of cities, edge = TRUE, warning=FALSE}
+
+Origins <- as.vector(TGVprices_4$Origin)
+Destinations <- as.vector(TGVprices_4$Destination)
+Cities <- c(Origins,Destinations)
+Allcities <- unique(Cities, ignore_case=TRUE)
+View(Allcities)
+```
+
+We now have 469 unique destinations. 
+There might be some duplicates because of slight differences in spelling, but that's ok because the Geonames API will find those cities anyway and return coordinates. And then, we will only coordinates.
+
+
+```{r coordinates}
+
+needs(geonames)
+
+#GNsearchFR <- function(x) {
+# res <- GNsearch(name=x, country="FR", username="faberlin90")
+# return(res[1, ])
+#}
+
+#Allcities.result <- sapply(Allcities, GNsearchFR)
+#Allcities.result <- do.call("rbind", Allcities.result)
+#Allcities.result <- cbind(city=row.names(Allcities.result), 
+#                  subset(Allcities.result, select=c("lng", "lat")))
+
+# Disable code and save csv file  for later. 
+# write.csv(Allcities.result, "Allcities.csv")                
+
+```
+
+Code is disabled for R Mark Down to prevent exceeding data limitations again
+
+## Add coordinates back into the file
+
+```{r merge}
+# Merge coordinates with prices for origins
+Allcities.result <- read.csv("Allcities.csv")
+
+colnames(Allcities.result) <- c("Origin","lng_origin","lat_origin")
+TGVprices_5 <- merge(TGVprices_4, Allcities.result, by="Origin")
+
+# Merge coordinates with prices for destinations
+colnames(Allcities.result) <- c("Destination","lng_destination","lat_destination")
+TGVprices_6 <- merge(TGVprices_5, Allcities.result, by="Destination")
+
+TGVprices_6$lng_origin <- as.numeric(TGVprices_6$lng_origin)
+TGVprices_6$lat_origin <- as.numeric(TGVprices_6$lat_origin)
+TGVprices_6$lng_destination <- as.numeric(TGVprices_6$lng_destination)
+TGVprices_6$lat_destination <- as.numeric(TGVprices_6$lat_destination)
+describe(TGVprices_6)
+
+```
+
+There are no missing values in latitudes and longitudes, the file is complete.
+
+
+## Add distances (test)
+
+```{r distances test}
+
+# Add distances with geosphere
+needs(geosphere)
+colnames(TGVprices_6)
+
+# Test with first line
+testdistance <- head(TGVprices_6,1)
+testdistance <- testdistance[,7:10]
+
+p1 <- as.vector(testdistance[1,1:2])
+p2 <- as.vector(testdistance[1,3:4])
+distHaversine(p1,p2)
+ 
+
+```
+
+The test works. 
+There are 643km between Le Mans and Aix en Provence, checked online on distancecalculator.net
+
+## Add distances (all lines)
+
+This part of code is disabled as it bugs in R Markdown.
+Output is exported to .csv so it can be reimported.
+
+```{r distances all lines, eval=FALSE, include=FALSE}
+
+# Add distances with geosphere
+
+DistanceVector <- apply(TGVprices_6[,c("lng_origin","lat_origin","lng_destination","lat_destination")],1,function(x) distHaversine(x[1:2],x[3:4]))
+TGVprices_6$distance <- DistanceVector 
+TGVprices_6$distance.km <- TGVprices_6$distance/1000
+
+# Create a pattern for Paris
+Paris <- "Paris"
+
+write.csv(TGVprices_6, "TGVprices_6.csv")
+
+```
+
+
+```{r distances describe}
+
+# Import csv
+TGVprices_6 <- read.csv("TGVprices_6.csv")
+
+# Descrive distance data 
+describe(TGVprices_6$distance.km)
+
+```
+
+Mean TGV line distance is 370mm. This makes sense. 
+There is no missing data
+
+It's interesting to see that some distances are really small (min =3km).
+
+## Role of distance in price
+
+```{r distance price, warning=FALSE}
+
+# Scatter plot
+ggplot(data=TGVprices_6) +
+  geom_point(aes(x=distance.km, y=Plein.Tarif.Loisir.2nde, color="2nd class")) +
+  geom_point(aes(x=distance.km, y=X1Ã.re.classe, color="1st class"))
+
+# Linear regression
+model1 <- lm(Plein.Tarif.Loisir.2nde~distance.km, data=TGVprices_6)
+summary(model1)
+
+```
+
+The model works well. One km adds on average 0.17c to the price of the 2nd class ticket.
+
+## Are trains to/from Paris more expensive?
+
+```{r Paris analysis}
+
+# Add a dummy variable for Paris
+TGVprices_6$Origin <- as.character(TGVprices_6$Origin)
+TGVprices_6$Destination <- as.character(TGVprices_6$Destination)
+
+  ## Identify rows involving Paris (there are several stations)
+Paris <- ignore.case("paris")
+TGVprices_6$Paris <- as.factor(ifelse((str_count(TGVprices_6$Origin,Paris)>0) | (str_count(TGVprices_6$Destination,Paris)>0),1,0))
+
+# 222 routes include one of the Paris stations
+describe(TGVprices_6$Paris)
+
+# Scatter plot
+ggplot(data=TGVprices_6) +
+  geom_point(aes(x=distance.km, y=Plein.Tarif.Loisir.2nde)) +
+  geom_smooth(aes(x=distance.km, y=Plein.Tarif.Loisir.2nde, linetype=Paris)) 
+
+# Add Paris variable to our model
+model2 <- lm(Plein.Tarif.Loisir.2nde~distance.km + Paris, data=TGVprices_6)
+summary(model2)
+
+
+```
+
+If the route is from or to Paris, there seems to be a premium from the chart, especially if the distance is below 500km.
+
+The regression confirms that there is a premium of 5.7 EUR to the ticket price.
+
+## First-class prices
+
+### Correlation with second class
+```{r First-class}
+
+# Scatter-plot of first and second class prices
+colnames(TGVprices_6)
+
+# Transform discount into a factor for better ggplot visibility
+TGVprices_6$Discounted <- as.factor(TGVprices_6$Discounted)
+ggplot(data=TGVprices_6) +
+  geom_point(aes(x=Plein.Tarif.Loisir.2nde, y=X1Ã.re.classe, color = Paris))
+
+ggplot(data=TGVprices_6) +
+  geom_point(aes(x=Plein.Tarif.Loisir.2nde, y=X1Ã.re.classe, color = Discounted))
+
+```
+
+The first chart shows an almost perfect correlation between first and second-class prices.
+
+The second chart shows that more expensive tickets tend to be more discounted. We can refine that by looking at the different prices for discounts (remember there are only 4).
+
+### Is the effect of Paris stronger on fist class price?
+
+```{r Paris 1st class analysis}
+
+
+# Scatter plot
+ggplot(data=TGVprices_6) +
+  geom_point(aes(x=distance.km, y=X1Ã.re.classe)) +
+  geom_smooth(aes(x=distance.km, y=X1Ã.re.classe, linetype=Paris)) 
+
+# Run model for first class
+model3 <- lm(X1Ã.re.classe ~ distance.km + Paris, data=TGVprices_6)
+summary(model3)
+
+
+```
+Paris adds 12EUR to the price of a first-class ticket.
+
+
+
+## Discounted tickets 
+
+```{r dummy discount}
+
+describe(TGVprices_6$Prix.d.appel.2nde)
+
+# Transform discounted price into a factor for better visibility of the graph
+TGVprices_6$Prix.d.appel.2nde <- as.factor(TGVprices_6$Prix.d.appel.2nde)
+ggplot(data=TGVprices_6) +
+  geom_point(aes(x=Plein.Tarif.Loisir.2nde, y=X1Ã.re.classe, color = TGVprices_6$Prix.d.appel.2nde))
+
+```
+
+The discount logic becomes clear:
+* Tickets below 40EUR in second class are not discounted
+* Above that, most are discounted with a strong correlation between price and discounted price
+
+## Map of routes density in France
+
+```{r map, eval=FALSE, warning=FALSE, include=TRUE}
+
+TGVprices_6 <- read.csv("TGVprices_6.csv")
+# Open libraries
+needs(ggmap,Rcpp,devtools)
+
+# Create list of all cities regardless of whether it is origin and destination
+colnames(TGVprices_6)
+Columns1 <- c(1,7,8)
+List1 <- TGVprices_6[,Columns1]
+
+Columns2 <- c(2,9,10)
+List2 <- TGVprices_6[,Columns1]
+Listofroutes <- as.data.frame(rbind(List1, List2))
+
+str(Listofroutes)
+Listofroutes$lng_origin <- as.numeric(Listofroutes$lng_origin)
+Listofroutes$lat_origin <- as.numeric(Listofroutes$lat_origin)
+
+
+France <- get_map(location = "France", zoom = 6) ##Get the France map
+Francemap <- ggmap(France, extent = "device")       ##Prepare Map
+
+
+
+Francemap +
+  stat_density2d(aes(x = lng_origin, y = lat_origin, fill = ..level..,alpha=..level..), bins = 5, geom = "polygon", data = Listofroutes) +
+  scale_fill_gradient(low = "red", high = "red", guide = "colourbar")+
+  ggtitle("Heatmap of high-speed lines density in France")
+
+dev.copy(png,'Heatmap of high-speed lines density in France.png')
+dev.off()
+
+```
+
+This map shows that trains are concentrated in Paris, Lyon, Marseille, Lille. 
+
+This hunk of R code works in R but not in R markdown so see attached file for map.
